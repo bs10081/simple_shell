@@ -7,8 +7,36 @@
 #include <limits.h>
 #include <readline/readline.h>
 #include <readline/history.h>
+#include <readline/history.h>
+#include <readline/readline.h>
+#include <readline/history.h>
 
+// 定義最大參數數量
 #define MAX_ARGS 64
+
+// 可選：自定義補全函數的前向宣告
+char **custom_completion(const char *text, int start, int end);
+char *command_generator(const char *text, int state);
+
+// 可選：定義支援的命令列表
+const char *commands[] = {
+    "ls",
+    "cd",
+    "pwd",
+    "echo",
+    "date",
+    "exit",
+    "grep",
+    "cat",
+    "mkdir",
+    "rmdir",
+    "rm",
+    "touch",
+    "find",
+    "chmod",
+    "chown",
+    NULL // 結尾需有 NULL
+};
 
 int main() {
     char *input;
@@ -16,6 +44,9 @@ int main() {
     char *token;
     pid_t pid;
     int status;
+
+    // 初始化 Readline 補全
+    rl_attempted_completion_function = custom_completion;
 
     while (1) {
         // 取得使用者名稱
@@ -42,8 +73,9 @@ int main() {
             break;
         }
 
-        // 去除輸入前後的空白
-        char *trimmed_input = strtok(input, "\n");
+        // 去除輸入前後的空白（Readline 已處理大部分情況，這裡僅示範）
+        char *trimmed_input = input;
+        // 您可以根據需要進一步處理 trimmed_input
 
         // 判斷是否輸入 exit
         if (trimmed_input && strcmp(trimmed_input, "exit") == 0) {
@@ -95,3 +127,34 @@ int main() {
     return 0;
 }
 
+// 自定義補全函數
+char **custom_completion(const char *text, int start, int end) {
+    // 當前補全在命令的第一個參數時，補全命令
+    // 否則，使用默認的文件補全
+    if (start == 0) {
+        return rl_completion_matches(text, command_generator);
+    } else {
+        // 使用默認的文件補全
+        return rl_completion_matches(text, rl_filename_completion_function);
+    }
+}
+
+// 命令生成器，用於生成命令補全
+char *command_generator(const char *text, int state) {
+    static int list_index;
+    const char *cmd;
+
+    if (state == 0) {
+        list_index = 0;
+    }
+
+    while ((cmd = commands[list_index])) {
+        list_index++;
+        if (strncmp(cmd, text, strlen(text)) == 0) {
+            return strdup(cmd);
+        }
+    }
+
+    // 沒有更多匹配
+    return NULL;
+}
