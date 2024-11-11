@@ -48,7 +48,7 @@ void load_dynamic_commands() {
                 char full_path[PATH_MAX];
                 snprintf(full_path, sizeof(full_path), "%s/%s", dir, entry->d_name);
                 struct stat sb;
-                if (stat(full_path, &sb) == 0 && sb.st_mode & S_IXUSR) {
+                if (stat(full_path, &sb) == 0 && (sb.st_mode & S_IXUSR)) {
                     // 添加到命令列表
                     dynamic_commands = realloc(dynamic_commands, sizeof(char*) * (dynamic_commands_count + 2));
                     if (!dynamic_commands) {
@@ -153,6 +153,28 @@ int main() {
 
         // 空輸入處理
         if (arg_count == 0) {
+            free(input);
+            continue;
+        }
+
+        // 檢查是否為內建指令 'cd'
+        if (strcmp(args[0], "cd") == 0) {
+            // 處理 'cd' 指令
+            if (arg_count < 2) {
+                // 如果沒有參數，跳轉到用戶主目錄
+                const char *home_dir = getenv("HOME");
+                if (home_dir == NULL) {
+                    home_dir = pw->pw_dir;
+                }
+                if (chdir(home_dir) != 0) {
+                    perror("cd");
+                }
+            } else {
+                // 跳轉到指定目錄
+                if (chdir(args[1]) != 0) {
+                    perror("cd");
+                }
+            }
             free(input);
             continue;
         }
