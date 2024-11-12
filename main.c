@@ -14,7 +14,7 @@
 #include <fcntl.h>
 #include <errno.h>
 
-// 定義 ANSI 顏色代碼
+// 定義 ANSI 顏色代碼（可選，用於提示符美化）
 #define COLOR_RESET   "\x1b[0m"
 #define COLOR_GREEN   "\x1b[32m"
 #define COLOR_BLUE    "\x1b[34m"
@@ -138,7 +138,7 @@ char *tilde_expansion(const char *path) {
         return strdup(home_dir);
     } else if (path[1] == '/') {
         size_t len = strlen(home_dir) + strlen(path);
-        char *expanded = malloc(len);
+        char *expanded = malloc(len + 1);
         if (!expanded) {
             perror("malloc failed");
             return NULL;
@@ -154,53 +154,33 @@ char *tilde_expansion(const char *path) {
 
 // 擴展歷史命令 !! 為上一條命令
 char *expand_history(const char *input) {
-    char *result = strdup(""); // 初始化為空字串
-    if (!result) {
-        perror("strdup failed");
-        return NULL;
+    // 確定是否存在 '!!'
+    char *pos = strstr(input, "!!");
+    if (!pos) {
+        return strdup(input); // 無需擴展
     }
-    const char *p = input;
-    size_t len = 0;
 
     HIST_ENTRY **hist_list = history_list();
     if (!hist_list || history_length == 0) {
         fprintf(stderr, "No commands in history.\n");
-        return result; // 無法擴展，返回空字串
+        return strdup(input); // 無法擴展，返回原輸入
     }
 
     const char *last_command = hist_list[history_length - 1]->line;
 
-    while (*p) {
-        if (*p == '!' && *(p + 1) == '!') {
-            // 將 '!!' 替換為 last_command
-            size_t last_len = strlen(last_command);
-            size_t new_len = len + last_len;
-            char *temp = realloc(result, new_len + 1);
-            if (!temp) {
-                perror("realloc failed");
-                free(result);
-                return NULL;
-            }
-            result = temp;
-            strcat(result, last_command);
-            len += last_len;
-            p += 2; // 跳過 '!!'
-        } else {
-            // 複製當前字符
-            size_t new_len = len + 1;
-            char *temp = realloc(result, new_len + 2); // +1 for new char, +1 for '\0'
-            if (!temp) {
-                perror("realloc failed");
-                free(result);
-                return NULL;
-            }
-            result = temp;
-            result[len] = *p;
-            result[len + 1] = '\0';
-            len += 1;
-            p += 1;
-        }
+    // 計算擴展後的字串長度
+    size_t new_len = strlen(input) - 2 + strlen(last_command) + 1;
+    char *result = malloc(new_len);
+    if (!result) {
+        perror("malloc failed");
+        return NULL;
     }
+
+    // 替換 '!!' 為 last_command
+    strncpy(result, input, pos - input);
+    result[pos - input] = '\0';
+    strcat(result, last_command);
+    strcat(result, pos + 2); // 跳過 '!!'
 
     return result;
 }
@@ -250,7 +230,7 @@ command_t* parse_input(char *input, int *background) {
                 redir_ptr += 1;
             }
             while (*redir_ptr == ' ') redir_ptr++; // 跳過空格
-            char *filename = strtok(redir_ptr, " ");
+            char *filename = strtok(redir_ptr, " \t");
             if (filename) {
                 cmd->output_redirection = strdup(filename);
                 // 進行 tilde 擴展
@@ -265,7 +245,7 @@ command_t* parse_input(char *input, int *background) {
             *redir_ptr = '\0';
             redir_ptr += 1;
             while (*redir_ptr == ' ') redir_ptr++; // 跳過空格
-            char *filename = strtok(redir_ptr, " ");
+            char *filename = strtok(redir_ptr, " \t");
             if (filename) {
                 cmd->input_redirection = strdup(filename);
                 // 進行 tilde 擴展
@@ -285,8 +265,9 @@ command_t* parse_input(char *input, int *background) {
         }
         int arg_count = 0;
 
-        // 使用 strtok_r 以空格和制表符分隔
-        char *arg_token = strtok_r(token, " \t", &saveptr_pipe);
+        // 使用 strtok_r 以空格和制表符分隔，使用獨立的 saveptr
+        char *saveptr_arg;
+        char *arg_token = strtok_r(token, " \t", &saveptr_arg);
         while (arg_token != NULL && arg_count < MAX_ARGS - 1) {
             // 處理引號
             if (arg_token[0] == '"' || arg_token[0] == '\'') {
@@ -300,7 +281,7 @@ command_t* parse_input(char *input, int *background) {
             } else {
                 args[arg_count++] = strdup(arg_token);
             }
-            arg_token = strtok_r(NULL, " \t", &saveptr_pipe);
+            arg_token = strtok_r(NULL, " \t", &saveptr_arg);
         }
         args[arg_count] = NULL;
 
@@ -509,7 +490,7 @@ int execute_commands(command_t *head, int background) {
                 fprintf(stderr, "Built-in commands cannot be used in pipelines.\n");
                 return -1;
             }
-            // 內建指令已處理
+            // 內建指令已處理，無需執行
         } else {
             execute_command(current, input_fd, pipe_fd[1], background);
         }
@@ -616,7 +597,7 @@ int main() {
                 home_dir = "";
         }
 
-        // 構建提示符，若在主目錄或其子目錄，顯示 ~
+        // 構建顯示路徑，若在主目錄或其子目錄，顯示 ~
         char display_path[PATH_MAX];
         if (strncmp(cwd, home_dir, strlen(home_dir)) == 0) {
             if (strlen(cwd) == strlen(home_dir)) {
@@ -630,9 +611,11 @@ int main() {
             strcpy(display_path, cwd);
         }
 
-        // 構建提示符
+        // 構建提示符（可選：使用顏色）
         char prompt[PATH_MAX + 64];
         snprintf(prompt, sizeof(prompt), "%s:%s$ ", username, display_path);
+        // 若要使用顏色，可以這樣：
+        // snprintf(prompt, sizeof(prompt), COLOR_GREEN "%s" COLOR_RESET ":%s$ ", username, display_path);
 
         // 使用 readline 讀取輸入
         input = readline(prompt);
@@ -646,6 +629,12 @@ int main() {
         // 去除輸入前後的空白
         char *trimmed_input = input;
         while (*trimmed_input == ' ' || *trimmed_input == '\t') trimmed_input++;
+        // 去除末尾空白
+        char *end = trimmed_input + strlen(trimmed_input) - 1;
+        while (end > trimmed_input && (*end == ' ' || *end == '\t')) {
+            *end = '\0';
+            end--;
+        }
 
         // 處理歷史命令展開（如 !!）
         if (strstr(trimmed_input, "!!")) {
