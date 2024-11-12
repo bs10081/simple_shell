@@ -90,7 +90,7 @@ void load_dynamic_commands() {
     free(path);
 }
 
-// Signal handler for SIGINT
+// 信號處理程序，用於處理 SIGINT (Ctrl+C)
 void sigint_handler(int sig) {
     // 在接收到 SIGINT 時，清除當前輸入並顯示新的提示符
     printf("\n");
@@ -118,25 +118,113 @@ void free_commands(command_t *head) {
     }
 }
 
+// 擴展 tilde (~) 為用戶主目錄
+char *tilde_expansion(const char *path) {
+    if (path[0] != '~') {
+        return strdup(path);
+    }
+
+    const char *home_dir = getenv("HOME");
+    if (!home_dir) {
+        struct passwd *pw = getpwuid(getuid());
+        if (pw)
+            home_dir = pw->pw_dir;
+        else
+            home_dir = "";
+    }
+
+    // 如果 path 是 "~" 或以 "~/" 開頭
+    if (strcmp(path, "~") == 0) {
+        return strdup(home_dir);
+    } else if (path[1] == '/') {
+        size_t len = strlen(home_dir) + strlen(path);
+        char *expanded = malloc(len);
+        if (!expanded) {
+            perror("malloc failed");
+            return NULL;
+        }
+        strcpy(expanded, home_dir);
+        strcat(expanded, path + 1); // 跳過 '~'
+        return expanded;
+    }
+
+    // 其他情況（如 ~user），暫不處理，返回原路徑
+    return strdup(path);
+}
+
+// 擴展歷史命令 !! 為上一條命令
+char *expand_history(const char *input) {
+    char *result = strdup(""); // 初始化為空字串
+    if (!result) {
+        perror("strdup failed");
+        return NULL;
+    }
+    const char *p = input;
+    size_t len = 0;
+
+    HIST_ENTRY **hist_list = history_list();
+    if (!hist_list || history_length == 0) {
+        fprintf(stderr, "No commands in history.\n");
+        return result; // 無法擴展，返回空字串
+    }
+
+    const char *last_command = hist_list[history_length - 1]->line;
+
+    while (*p) {
+        if (*p == '!' && *(p + 1) == '!') {
+            // 將 '!!' 替換為 last_command
+            size_t last_len = strlen(last_command);
+            size_t new_len = len + last_len;
+            char *temp = realloc(result, new_len + 1);
+            if (!temp) {
+                perror("realloc failed");
+                free(result);
+                return NULL;
+            }
+            result = temp;
+            strcat(result, last_command);
+            len += last_len;
+            p += 2; // 跳過 '!!'
+        } else {
+            // 複製當前字符
+            size_t new_len = len + 1;
+            char *temp = realloc(result, new_len + 2); // +1 for new char, +1 for '\0'
+            if (!temp) {
+                perror("realloc failed");
+                free(result);
+                return NULL;
+            }
+            result = temp;
+            result[len] = *p;
+            result[len + 1] = '\0';
+            len += 1;
+            p += 1;
+        }
+    }
+
+    return result;
+}
+
 // 解析輸入指令行
 command_t* parse_input(char *input, int *background) {
     command_t *head = NULL;
     command_t *current = NULL;
 
     char *token;
-    char *saveptr;
+    char *saveptr_pipe;
     int cmd_index = 0;
 
     // 檢查是否有背景執行符號 '&'
-    if (input[strlen(input) - 1] == '&') {
+    size_t input_len = strlen(input);
+    if (input_len > 0 && input[input_len - 1] == '&') {
         *background = 1;
-        input[strlen(input) - 1] = '\0'; // 移除 '&'
+        input[input_len - 1] = '\0'; // 移除 '&'
     } else {
         *background = 0;
     }
 
     // 使用 strtok_r 以 '|' 分隔多個命令
-    token = strtok_r(input, "|", &saveptr);
+    token = strtok_r(input, "|", &saveptr_pipe);
     while (token != NULL && cmd_index < MAX_COMMANDS) {
         command_t *cmd = malloc(sizeof(command_t));
         if (!cmd) {
@@ -165,6 +253,10 @@ command_t* parse_input(char *input, int *background) {
             char *filename = strtok(redir_ptr, " ");
             if (filename) {
                 cmd->output_redirection = strdup(filename);
+                // 進行 tilde 擴展
+                char *expanded = tilde_expansion(cmd->output_redirection);
+                free(cmd->output_redirection);
+                cmd->output_redirection = expanded;
             }
         }
 
@@ -176,6 +268,10 @@ command_t* parse_input(char *input, int *background) {
             char *filename = strtok(redir_ptr, " ");
             if (filename) {
                 cmd->input_redirection = strdup(filename);
+                // 進行 tilde 擴展
+                char *expanded = tilde_expansion(cmd->input_redirection);
+                free(cmd->input_redirection);
+                cmd->input_redirection = expanded;
             }
         }
 
@@ -189,8 +285,8 @@ command_t* parse_input(char *input, int *background) {
         }
         int arg_count = 0;
 
-        // 使用 strtok_r 以空格分隔
-        char *arg_token = strtok_r(token, " \t", &saveptr);
+        // 使用 strtok_r 以空格和制表符分隔
+        char *arg_token = strtok_r(token, " \t", &saveptr_pipe);
         while (arg_token != NULL && arg_count < MAX_ARGS - 1) {
             // 處理引號
             if (arg_token[0] == '"' || arg_token[0] == '\'') {
@@ -204,9 +300,18 @@ command_t* parse_input(char *input, int *background) {
             } else {
                 args[arg_count++] = strdup(arg_token);
             }
-            arg_token = strtok_r(NULL, " \t", &saveptr);
+            arg_token = strtok_r(NULL, " \t", &saveptr_pipe);
         }
         args[arg_count] = NULL;
+
+        // 進行 tilde 擴展
+        for (int i = 0; i < arg_count; i++) {
+            if (args[i][0] == '~') {
+                char *expanded = tilde_expansion(args[i]);
+                free(args[i]);
+                args[i] = expanded;
+            }
+        }
 
         if (arg_count > 0) {
             cmd->name = strdup(args[0]);
@@ -226,7 +331,7 @@ command_t* parse_input(char *input, int *background) {
         }
 
         cmd_index++;
-        token = strtok_r(NULL, "|", &saveptr);
+        token = strtok_r(NULL, "|", &saveptr_pipe);
     }
 
     return head;
@@ -266,12 +371,12 @@ int handle_built_in(command_t *cmd) {
 
     if (strcmp(cmd->name, "help") == 0) {
         printf("Simple Shell Built-in Commands:\n");
-        printf("  cd [dir]      Change the current directory to 'dir'.\n");
-        printf("  exit          Exit the shell.\n");
-        printf("  echo [args]   Display the given arguments.\n");
-        printf("  help          Display this help message.\n");
-        printf("  history       Show command history.\n");
-        printf("  export VAR=val Set environment variable VAR to val.\n");
+        printf("  cd [dir]        Change the current directory to 'dir'.\n");
+        printf("  exit            Exit the shell.\n");
+        printf("  echo [args]     Display the given arguments.\n");
+        printf("  help            Display this help message.\n");
+        printf("  history         Show command history.\n");
+        printf("  export VAR=val  Set environment variable VAR to val.\n");
         return 1;
     }
 
@@ -308,7 +413,7 @@ int handle_built_in(command_t *cmd) {
     return 0; // 不是內建指令
 }
 
-// 執行單個命令（不處理管道）
+// 執行單個命令（處理重定向和變數展開）
 int execute_command(command_t *cmd, int input_fd, int output_fd, int background) {
     pid_t pid = fork();
     if (pid < 0) {
@@ -361,18 +466,6 @@ int execute_command(command_t *cmd, int input_fd, int output_fd, int background)
         }
 
         // 執行命令
-        // 變數展開
-        for (int i = 0; cmd->args[i] != NULL; i++) {
-            if (cmd->args[i][0] == '$') {
-                char *var_name = cmd->args[i] + 1;
-                char *var_value = getenv(var_name);
-                if (var_value) {
-                    free(cmd->args[i]);
-                    cmd->args[i] = strdup(var_value);
-                }
-            }
-        }
-
         execvp(cmd->name, cmd->args);
         // 如果 execvp 返回，說明執行失敗
         perror("Command execution failed");
@@ -513,9 +606,33 @@ int main() {
             continue;
         }
 
+        // 取得使用者主目錄
+        const char *home_dir = getenv("HOME");
+        if (!home_dir) {
+            pw = getpwuid(getuid());
+            if (pw)
+                home_dir = pw->pw_dir;
+            else
+                home_dir = "";
+        }
+
+        // 構建提示符，若在主目錄或其子目錄，顯示 ~
+        char display_path[PATH_MAX];
+        if (strncmp(cwd, home_dir, strlen(home_dir)) == 0) {
+            if (strlen(cwd) == strlen(home_dir)) {
+                strcpy(display_path, "~");
+            } else if (cwd[strlen(home_dir)] == '/') {
+                snprintf(display_path, sizeof(display_path), "~%s", cwd + strlen(home_dir));
+            } else {
+                strcpy(display_path, cwd);
+            }
+        } else {
+            strcpy(display_path, cwd);
+        }
+
         // 構建提示符
         char prompt[PATH_MAX + 64];
-        snprintf(prompt, sizeof(prompt), "%s:%s$ ", username, cwd);
+        snprintf(prompt, sizeof(prompt), "%s:%s$ ", username, display_path);
 
         // 使用 readline 讀取輸入
         input = readline(prompt);
@@ -529,6 +646,19 @@ int main() {
         // 去除輸入前後的空白
         char *trimmed_input = input;
         while (*trimmed_input == ' ' || *trimmed_input == '\t') trimmed_input++;
+
+        // 處理歷史命令展開（如 !!）
+        if (strstr(trimmed_input, "!!")) {
+            char *expanded_input = expand_history(trimmed_input);
+            if (!expanded_input) {
+                free(input);
+                continue;
+            }
+            free(input);
+            input = expanded_input;
+            trimmed_input = input;
+            printf("%s\n", trimmed_input); // 顯示展開後的命令
+        }
 
         // 判斷是否輸入 exit
         if (trimmed_input && strcmp(trimmed_input, "exit") == 0) {
